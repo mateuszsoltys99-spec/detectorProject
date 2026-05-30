@@ -1,3 +1,5 @@
+from typing import List
+
 from data_model.dataModel import Config
 
 

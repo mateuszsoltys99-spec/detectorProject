@@ -1,7 +1,6 @@
 from flask import Flask, jsonify, request
 
 import cv2
-import threading
 
 import multi_thread_data_processing.multiThreadDataProcessing as mtl
 from data_model.dataModel import Config
@@ -12,44 +11,25 @@ app = Flask(__name__)
 cameras = AllCameras()
 
 
-# def main():
-#     data_display = mtl.DataSink(cameras.data_output, cameraIO.CameraDisplay("Video", cameras.camera_data))
-#     data_display.start()
-#     app.run()
-
-
-# output_map = {}
-
-
 def main():
     data_display = mtl.DataSink(cameras.data_output, CameraDisplayPersonDetections())
     data_display.start()
     app.run(host='0.0.0.0', port=2137)
 
 
-def get_cameras():
-    result = cameras.cameras_to_dict()
-    return jsonify(result)
-#
-#
-# @app.route('/cameras/output', methods=['GET'])
-# def get_output_rest():
-#     return jsonify(output_map)
-
-
 @app.route('/cameras/get', methods=['GET'])
 def get_cameras_rest():
-    return get_cameras()
+    return jsonify(cameras.cameras_to_dict())
 
 
 @app.route('/cameras/activate', methods=['PUT'])
 def stop_start_cameras_rest():
     index: str = request.args.get("index")
     active: str = request.args.get("active")
-    if active.__eq__("true"):
+    if active == "true":
         cameras.start_camera(int(index))
         return "camera {} turned on".format(index), 200
-    elif active.__eq__("false"):
+    elif active == "false":
         cameras.stop_camera(int(index))
         return "camera {} turned off".format(index), 200
     else:
@@ -64,13 +44,12 @@ def create_camera_rest():
         x: int = int(request.args.get("x"))
         y: int = int(request.args.get("y"))
         angle: float = float(request.args.get("angle"))
-    except:
+    except (TypeError, ValueError):
         return "wrong arguments", 400
-    print("Creating camera with index {}, fps {}, and starting point {},{}".format(index, fps, x, y))
     try:
         cameras.add_camera(index, fps, x, y, angle)
-    except:
-        return "index {} does not exist".format(index), 500
+    except Exception as exc:
+        return "could not create camera {}: {}".format(index, exc), 500
     return "camera {} created".format(index), 200
 
 
@@ -82,20 +61,18 @@ def update_camera_rest():
         x: int = int(request.args.get("x"))
         y: int = int(request.args.get("y"))
         angle: float = float(request.args.get("angle"))
-    except:
+    except (TypeError, ValueError):
         return "wrong arguments", 400
     if index not in cameras.indexes:
-        return "camera {} does not exist".format(index), 500
-    lock = threading.Lock()
-    lock.acquire(blocking=True, timeout=-1)
-    camera = cameras.all_cameras.get(index)
-    camera.fps = fps
-    camera.data_getter.period = 1/fps
-    camera.x = x
-    camera.y = y
-    camera.angle = angle
-    cameras.camera_data[index] = x, y, angle, camera.resolution, camera.cals_display_points()
-    lock.release()
+        return "camera {} does not exist".format(index), 404
+    with cameras._lock:
+        camera = cameras.all_cameras[index]
+        camera.fps = fps
+        camera.data_getter.period = 1 / fps
+        camera.x = x
+        camera.y = y
+        camera.angle = angle
+        cameras.camera_data[index] = (x, y, angle, camera.resolution, camera.cals_display_points())
     return "camera {} updated".format(index), 200
 
 
@@ -120,9 +97,9 @@ def get_available_resolutions_rest():
         if index not in cameras.indexes:
             cap = cv2.VideoCapture(index)
             if cap.isOpened():
-                result[index] = cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                result[index] = (cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                 cap.release()
-    return "available indexes and resolutions: {}".format(result), 200
+    return jsonify({"resolutions": result}), 200
 
 
 if __name__ == "__main__":
