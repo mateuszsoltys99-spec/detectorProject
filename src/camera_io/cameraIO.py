@@ -1,14 +1,13 @@
 from copy import deepcopy
 from queue import Queue
 from typing import Optional, List, Dict, Tuple
-
-#import apriltag
-import cv2
 import threading
+
+import cv2
 import torch
 import numpy as np
-from camera_io.settings import Settings
 
+from camera_io.settings import Settings
 from image_transforms.imageTransforms import DetectObjectWithModelTransform
 import multi_thread_data_processing.multiThreadDataProcessing as mtl
 from data_model.dataModel import Config
@@ -40,172 +39,64 @@ class CameraReader(mtl.GetParent):
 class CameraDisplayPersonDetections(mtl.SinkParent):
     def __init__(self):
         super(CameraDisplayPersonDetections, self).__init__()
-        self.__camera_detections = {}
-        # self.__output_map = output_map
+        self.__camera_detections: Dict[int, int] = {}
+        self.__lock = threading.Lock()
 
     def sink_data(self, input_object: List[FrameObjectWithBoundingBoxes]):
         for frame_object in input_object:
             frame_to_draw = deepcopy(frame_object.get_frame())
             camera_index = frame_object.get_index()
             bboxes = frame_object.get_bounding_boxes()
-            frame_x, frame_y = frame_to_draw.shape[0], frame_to_draw.shape[1]
+            # frame.shape is (height, width, channels); iterate over bboxes in (x, y, w, h) == (col, row, w, h)
+            frame_h, frame_w = frame_to_draw.shape[:2]
             for x_s, y_s, w, h in bboxes:
-                frame_to_draw[x_s:min(frame_x - 1, x_s + w), y_s, :] = [255, 0, 0]
-                frame_to_draw[x_s:min(frame_x - 1, x_s + w), min(frame_y - 1, y_s + h), :] = [255, 0, 0]
-                frame_to_draw[min(frame_x - 1, x_s + w), y_s:min(frame_y - 1, y_s + h), :] = [255, 0, 0]
-                frame_to_draw[x_s, y_s:min(frame_x - 1, y_s + h), :] = [255, 0, 0]
-            if len(bboxes) != self.__camera_detections.get(camera_index, None) and len(bboxes) != 0:
-                threading.Thread(target=send_notification, args=(camera_index, frame_to_draw)).start()
-            self.__camera_detections[camera_index] = len(bboxes)
-            # self.__output_map[camera_index] = frame_to_draw.tolist()
-            # threading.Thread(target=send_request, args=(camera_index, frame_to_draw,)).start()
-            # cv2.destroyAllWindows()
-            # cv2.imshow("Camera: {}".format(camera_index), frame_to_draw)
-            # cv2.waitKey(1)
+                x_end = min(frame_w - 1, x_s + w)
+                y_end = min(frame_h - 1, y_s + h)
+                # top and bottom horizontal edges
+                frame_to_draw[y_s, x_s:x_end, :] = [255, 0, 0]
+                frame_to_draw[y_end, x_s:x_end, :] = [255, 0, 0]
+                # left and right vertical edges
+                frame_to_draw[y_s:y_end, x_s, :] = [255, 0, 0]
+                frame_to_draw[y_s:y_end, x_end, :] = [255, 0, 0]
 
-
-#def send_request(camera_index, frame):
-#    data = {
-#        "index": camera_index,
-#        "frame": frame.tolist()
-#    }
-#    requests.post("http://192.168.1.252:6969/receive", json=data)
-
-
-class CameraDisplay(mtl.SinkParent):
-    def __init__(self, window_name: str, camera_data: Dict[int, Tuple[int, int, float, Tuple[int, int], Tuple]]):
-        super(CameraDisplay, self).__init__()
-        self.window_name = window_name
-        config = Config()
-        self.window_size: Tuple[int, int] = config.get_window_size()
-        self.detected_objects_centers: Dict[int, Dict[int, Tuple[int, int]]] = {}
-        self.detected_objects_rots: Dict[int, Dict[int, float]] = {}
-        self.indexes = config.get_objects().keys()
-        self.camera_data = camera_data
-        self.cameras = set()
-        self.first_frames = {}
-
-    def sink_data(self, input_object: List[FrameObjectWithDetectedObjects]):
-        frame_window = np.zeros((*self.window_size, 3))
-        for detected_frame in input_object:
-            if detected_frame.get_index() not in self.cameras:
-                self.cameras.add(detected_frame.get_index())
-            self.first_frames[detected_frame.get_index()] = detected_frame.get_frame()
-            self.detected_objects_centers[detected_frame.get_index()] = detected_frame.centers
-            self.detected_objects_rots[detected_frame.get_index()] = detected_frame.rots
-            for object_index in self.indexes:
-                if object_index in self.detected_objects_centers[detected_frame.get_index()]:
-                    x_from_camera = self.camera_data.get(detected_frame.get_index())[0]
-                    y_from_camera = self.camera_data.get(detected_frame.get_index())[1]
-                    cosine = np.cos(self.camera_data.get(detected_frame.get_index())[2])
-                    sine = np.sin(self.camera_data.get(detected_frame.get_index())[2])
-                    x_detected = self.detected_objects_centers.get(detected_frame.get_index()).get(object_index)[0]
-                    y_detected = self.detected_objects_centers.get(detected_frame.get_index()).get(object_index)[1]
-                    self.detected_objects_centers.get(detected_frame.get_index())[object_index] = \
-                        int(x_from_camera + x_detected * cosine - y_detected * sine), \
-                        int(y_from_camera + x_detected * sine + y_detected * cosine)
-        frames_to_display = deepcopy(self.first_frames)
-        for object_index in self.indexes:
-            i = 0
-            x = 0
-            y = 0
-            rot = 0
-            for camera_index in self.cameras:
-                if object_index in self.detected_objects_centers.get(camera_index):
-                    i += 1
-                    x_p = self.detected_objects_centers.get(camera_index).get(object_index)[0]
-                    x += x_p
-                    y_p = self.detected_objects_centers.get(camera_index).get(object_index)[1]
-                    y += y_p
-                    rot_p = self.detected_objects_rots.get(camera_index).get(object_index) \
-                            + self.camera_data.get(camera_index)[2]
-                    rot_p = rot_p - np.floor(rot_p / (2*np.pi))*2*np.pi
-                    if rot == 0:
-                        rot = rot_p
-                    elif np.abs(rot - rot_p) > np.pi:
-                        rot = (rot + np.pi + rot_p)/2
-                    else:
-                        rot = (rot + rot_p) / 2
-                    x_1 = x_p - self.camera_data.get(camera_index)[0]
-                    y_1 = y_p - self.camera_data.get(camera_index)[1]
-                    cosine = np.cos(self.camera_data.get(camera_index)[2])
-                    sine = np.sin(self.camera_data.get(camera_index)[2])
-                    frames_to_display[camera_index] = cv2.circle(frames_to_display[camera_index], (
-                        int(x_1*cosine + y_1*sine),
-                        int(y_1*cosine - x_1*sine)), 5,
-                                                                 (255, 0, 0), -1)
-                    frames_to_display[camera_index] = cv2.putText(frames_to_display[camera_index],
-                                                                  "object: {}: rot: {}".format(object_index,
-                                                                                               str(rot_p - self.camera_data.get(camera_index)[2])), (
-                                                                      int(x_1*cosine + y_1*sine),
-                                                                      int(y_1*cosine - x_1*sine + 15)),
-                                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-            if i != 0:
-                x = x // i
-                y = y // i
-                # rot = rot / i
-                for camera_index in self.cameras:
-                    cosine = np.cos(self.camera_data.get(camera_index)[2])
-                    sine = np.sin(self.camera_data.get(camera_index)[2])
-                    x_1 = x - self.camera_data.get(camera_index)[0]
-                    y_1 = y - self.camera_data.get(camera_index)[1]
-                    frames_to_display[camera_index] = cv2.putText(frames_to_display[camera_index],
-                                                                  "object: {}: rot: {}".format(object_index, str(rot)),
-                                                                  (
-                                                                      int(x_1*cosine + y_1*sine),
-                                                                      int(y_1*cosine - x_1*sine)),
-                                                                  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                    frames_to_display[camera_index] = cv2.circle(frames_to_display[camera_index], (
-                        int(x_1*cosine + y_1*sine), int(y_1*cosine - x_1*sine)), 5, (0, 0, 255), -1)
-                cv2.putText(frame_window, "object: {}: rot: {}".format(object_index, str(rot)), (x, y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                cv2.putText(frame_window, "x: {}, y: {}".format(x, y), (x + 83, y + 18),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                cv2.circle(frame_window, (x, y), 5, (0, 0, 255), -1)
-        for camera_index in self.cameras:
-            cv2.imshow("Camera: {}".format(camera_index), frames_to_display[camera_index])
-            x_cam = self.camera_data.get(camera_index)[0]
-            y_cam = self.camera_data.get(camera_index)[1]
-            cv2.polylines(frame_window, [self.camera_data.get(camera_index)[4]], True, (255, 0, 0), 1)
-            cv2.putText(frame_window, "Camera {}".format(camera_index), (x_cam, y_cam + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-        cv2.destroyAllWindows()
-        cv2.imshow(self.window_name, frame_window)
-        cv2.waitKey(1)
-
-    def stop(self):
-        cv2.destroyWindow(self.window_name)
-
-    def __del__(self):
-        cv2.destroyWindow(self.window_name)
+            with self.__lock:
+                prev_count = self.__camera_detections.get(camera_index)
+                if len(bboxes) != prev_count and len(bboxes) != 0:
+                    threading.Thread(
+                        target=send_notification,
+                        args=(camera_index, frame_to_draw),
+                        daemon=True,
+                    ).start()
+                self.__camera_detections[camera_index] = len(bboxes)
 
 
 class Camera:
-    def __init__(self,
-                 index: int,
-                 fps: float,
-                 x: int,
-                 y: int,
-                 angle: float,
-                 data_output: List[Queue],
-                 model):
+    def __init__(
+        self,
+        index: int,
+        fps: float,
+        x: int,
+        y: int,
+        angle: float,
+        data_output: List[Queue],
+        model,
+    ):
         self.index = index
         self.fps = fps
         self.x = x
         self.y = y
         self.angle = angle
         self.status = "INACTIVE"
-        data_from_input = [Queue()]
         self.settings: Settings = Settings()
         camera_reader = CameraReader(self.index)
         self.resolution = camera_reader.get_resolution()
-        self.data_getter = mtl.PeriodicDataGetter(data_from_input,
-                                                  camera_reader,
-                                                  self.fps)
-        self.data_worker_detect = mtl.DataWorker(data_from_input,
-                                                 data_output,
-                                                 mtl.OperationChain()
-                                                 .add_operation(
-                                                     DetectObjectWithModelTransform(BaseYoloDetector(model))))
+        data_from_input: List[Queue] = [Queue()]
+        self.data_getter = mtl.PeriodicDataGetter(data_from_input, camera_reader, self.fps)
+        self.data_worker_detect = mtl.DataWorker(
+            data_from_input,
+            data_output,
+            mtl.OperationChain().add_operation(DetectObjectWithModelTransform(BaseYoloDetector(model))),
+        )
 
     def cals_display_points(self):
         p1 = [int(self.x), int(self.y)]
@@ -236,11 +127,11 @@ class Camera:
             "fps": self.fps,
             "status": self.status,
             "handle point": (self.x, self.y),
-            "camera angle": self.angle
+            "camera angle": self.angle,
         }
 
     def __str__(self) -> str:
-        return " FPS: {}".format(self.fps)
+        return "Camera {}: FPS={}".format(self.index, self.fps)
 
 
 class AllCameras:
@@ -248,18 +139,19 @@ class AllCameras:
         self.all_cameras: Dict[int, Camera] = {}
         self.indexes: List[int] = []
         self.data_output: List[Queue] = []
-        self.camera_data = {}
-        device = torch.device("cuda")
-        print("CUDA IS AVAILABLE {}".format(torch.cuda.is_available()))
+        self.camera_data: Dict[int, tuple] = {}
+        self._lock = threading.Lock()
+        print("CUDA available: {}".format(torch.cuda.is_available()))
         self.__yolo_model = torch.hub.load('ultralytics/yolov5', 'yolov5s')
-#        self.__yolo_model.to(device)
 
     def add_camera(self, index: int, fps: float, x: int, y: int, angle: float):
-        output_object: Queue = Queue()
-        self.data_output.append(output_object)
-        self.all_cameras[index] = Camera(index, fps, x, y, angle, [output_object], self.__yolo_model)
-        self.indexes.append(index)
-        self.camera_data[index] = x, y, angle, self.all_cameras.get(index).resolution, self.all_cameras.get(index).cals_display_points()
+        output_queue: Queue = Queue()
+        with self._lock:
+            self.data_output.append(output_queue)
+            self.all_cameras[index] = Camera(index, fps, x, y, angle, [output_queue], self.__yolo_model)
+            self.indexes.append(index)
+            camera = self.all_cameras[index]
+            self.camera_data[index] = (x, y, angle, camera.resolution, camera.cals_display_points())
 
     def start_camera(self, index: int):
         self.all_cameras[index].start()
@@ -275,12 +167,18 @@ class AllCameras:
         for index in self.indexes:
             self.stop_camera(index)
 
-    def cameras_to_dict(self) -> Dict:
-        result = {}
-        for index in self.indexes:
-            result[index] = self.all_cameras[index].to_dict()
-        return result
-
     def remove_camera(self, index: int):
-        self.stop_camera(index)
-        self.all_cameras.pop(index)
+        with self._lock:
+            self.stop_camera(index)
+            camera = self.all_cameras.pop(index)
+            self.indexes.remove(index)
+            self.camera_data.pop(index, None)
+            # Remove the queue that belonged to this camera from data_output
+            output_queues = camera.data_worker_detect.output_object
+            for q in output_queues:
+                if q in self.data_output:
+                    self.data_output.remove(q)
+
+    def cameras_to_dict(self) -> Dict:
+        with self._lock:
+            return {index: self.all_cameras[index].to_dict() for index in self.indexes}

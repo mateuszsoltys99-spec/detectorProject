@@ -1,8 +1,11 @@
+import os
 from datetime import datetime
 from typing import Tuple, List, Dict
 
 import numpy as np
 import yaml
+
+_DEFAULT_CONFIG_PATH = "src/resources/config.yml"
 
 
 def singleton(cls):
@@ -19,11 +22,9 @@ def singleton(cls):
 @singleton
 class Config:
     def __init__(self):
-        with open("/tmp/build/src/resources/config.yml", "r") as ymlfile:
+        config_path = os.environ.get("CONFIG_PATH", _DEFAULT_CONFIG_PATH)
+        with open(config_path, "r") as ymlfile:
             self.cfg: dict = yaml.load(ymlfile, Loader=yaml.FullLoader)
-
-    def get_camera_indexes(self) -> List[int]:
-        return list(self.cfg.get("cameras").keys())
 
     def get_max_search_index(self) -> int:
         return int(self.cfg.get("max_search_index"))
@@ -70,5 +71,5 @@ class FrameObjectWithBoundingBoxes(FrameObject):
         super(FrameObjectWithBoundingBoxes, self).__init__(frame, camera_index)
         self.__bboxes = bboxes
 
-    def get_bounding_boxes(self):
+    def get_bounding_boxes(self) -> List[Tuple[int, int, int, int]]:
         return self.__bboxes

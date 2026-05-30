@@ -1,5 +1,5 @@
 FROM datamachines/cudnn_tensorflow_opencv:10.1_2.1.0_4.3.0-20200423
-EXPOSE 5000
+EXPOSE 2137
 RUN mkdir /tmp/build/
 #RUN apt-get update
 #RUN apt-get install pip -y

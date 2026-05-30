@@ -1,106 +1,99 @@
+import queue
 import threading
 import time
 from typing import List, Optional, Any
 from queue import Queue
 
+_POLL_TIMEOUT = 0.05  # seconds; used by blocking queue reads to stay responsive to stop signals
+
 
 class OperationParent:
     def __init__(self, side_input: Optional[Any] = None):
         """
-        A parent class for a single operation. Operation objects should implement it
+        A parent class for a single operation. Operation objects should implement it.
         @param side_input: optional additional input used when the run() method is executed
         """
         self.side_input = side_input
 
     def run(self, input_object: Any) -> Any:
         """
-        Run method, executed on the input_object by DataWorker, should return a type accepted by the run() method of
-        the next OperationParent in OperationChain
-        @param input_object: any object that will be processed by the
-            OperationParent
+        Run method, executed on the input_object by DataWorker. Should return a type accepted
+        by the run() method of the next OperationParent in OperationChain.
+        @param input_object: any object that will be processed by the OperationParent
         @return: processed input_object
         """
         return input_object
 
     def set_side_input(self, side_input: Any):
         """
-        Updates additional input of the OperationParent
-        @param side_input: any object that can serve as a side input, remember to specify types
-            your OperationParent can process
+        Updates additional input of the OperationParent.
+        @param side_input: any object that can serve as a side input
         """
         self.side_input = side_input
 
     def get_side_input(self) -> Optional[Any]:
-        """
-        Returns current side input of the OperationParent
-        @return: current object used as a side input
-        """
+        """Returns current side input of the OperationParent."""
         return self.side_input
 
 
-"""
-add_operation(operation_object: OperationParent) method is used to add consecutive data
-pipeline operations. It's written so it's possible to create an OperationChain following way:
-operationChain = OperationChain().add_operation(operation1).add_operation(operation2).add_operation(operation3)
-"""
-
-
 class OperationChain:
+    """
+    Fluent builder for chaining OperationParent steps:
+        chain = OperationChain().add_operation(op1).add_operation(op2)
+    """
+
     def __init__(self):
         self.operations: List[OperationParent] = []
 
-    def add_operation(self, operation_object: OperationParent):
+    def add_operation(self, operation_object: OperationParent) -> "OperationChain":
         self.operations.append(operation_object)
         return self
 
-    # method used by DataWorker to execute operations, don't use it
     def run_operations(self, input_object: List[Any]) -> Any:
+        """Execute the operation chain sequentially. Used internally by DataWorker."""
         output_object = input_object
-        for operationObject in self.operations:
-            output_object = operationObject.run(output_object)
+        for operation in self.operations:
+            output_object = operation.run(output_object)
         return output_object
 
 
-"""
-A DataWorker object, executes the OperationChain on incoming data objects
-"""
-
-
 class DataWorker:
+    """
+    Drains items from input queues, runs the OperationChain on each batch, and
+    pushes the result to all output queues.
+    """
+
     def __init__(self, input_object: List[Queue], output_object: List[Queue], operation_chain: OperationChain):
         self.input_object = input_object
         self.output_object = output_object
         self.operation_chain = operation_chain
-        self.stop_event = False
+        self._stop_event = threading.Event()
 
     def start(self):
-        self.stop_event = False
-        threading.Thread(target=self.run, args=()).start()
+        self._stop_event.clear()
+        threading.Thread(target=self._run, daemon=True).start()
 
-    def run(self):
-        while not self.stop_event:
-            if self.input_object:
-                current_obj = []
-                for input_queue in self.input_object:
-                    if not input_queue.empty():
-                        current_obj.append(input_queue.get())
-                if current_obj:
-                    # timestamp = datetime.now()
-                    for output_queue in self.output_object:
-                        output_queue.put(self.operation_chain.run_operations(current_obj))
-                    # print(datetime.now() - timestamp)
+    def _run(self):
+        while not self._stop_event.is_set():
+            current_obj = []
+            for input_queue in self.input_object:
+                try:
+                    current_obj.append(input_queue.get(timeout=_POLL_TIMEOUT))
+                except queue.Empty:
+                    pass
+            if current_obj:
+                result = self.operation_chain.run_operations(current_obj)
+                for output_queue in self.output_object:
+                    output_queue.put(result)
 
-    # Use this method to stop DataWorker, waits until current OperationChain is finished
     def stop(self):
-        self.stop_event = True
-
-
-"""
-Parent class for a data getter. Inherit it and use get_data() method for operations executed every loop iteration
-"""
+        """Signal the worker to stop and wait for the current operation to finish."""
+        self._stop_event.set()
 
 
 class GetParent:
+    """Parent class for a data producer. Subclass and override get_data()."""
+
     def __init__(self, side_input: Optional[Any] = None):
         self.side_input = side_input
 
@@ -111,69 +104,70 @@ class GetParent:
         pass
 
 
-"""
-DataGetter is used to catch data input from a GetParent object
-"""
-
-
 class DataGetter:
+    """
+    Calls get_parent.get_data() in a tight loop and pushes non-None results to
+    all output queues.
+    """
+
     def __init__(self, output_object: List[Queue], get_parent: GetParent):
         self.output_object = output_object
         self.get_parent = get_parent
-        self.stop_event = False
+        self._stop_event = threading.Event()
 
     def start(self):
-        self.stop_event = False
-        threading.Thread(target=self.run, args=()).start()
+        self._stop_event.clear()
+        threading.Thread(target=self._run, daemon=True).start()
 
-    def run(self):
-        while not self.stop_event:
+    def _run(self):
+        while not self._stop_event.is_set():
             current_obj = self.get_parent.get_data()
             if current_obj is not None:
-                for outputQueue in self.output_object:
-                    outputQueue.put(current_obj)
+                for output_queue in self.output_object:
+                    output_queue.put(current_obj)
         self.get_parent.stop()
 
     def stop(self):
-        self.stop_event = True
+        self._stop_event.set()
 
 
 class PeriodicDataGetter:
-    def __init__(self,
-                 output_object: List[Queue],
-                 get_parent: GetParent,
-                 frequency: float):
+    """
+    Calls get_parent.get_data() at a fixed frequency and pushes non-None results
+    to all output queues. Runs in a single background thread — no unbounded
+    thread spawning.
+    """
+
+    def __init__(self, output_object: List[Queue], get_parent: GetParent, frequency: float):
         self.output_object = output_object
         self.get_parent = get_parent
-        self.stop_event = False
-        self.period = 1/frequency
-
-    def get_data(self):
-        current_obj = self.get_parent.get_data()
-        if current_obj is not None:
-            for outputQueue in self.output_object:
-                outputQueue.put(current_obj)
-
-    def main_loop(self):
-        while not self.stop_event:
-            threading.Thread(target=self.get_data, args=()).start()
-            time.sleep(self.period)
-        self.stop_event = True
+        self.period = 1.0 / frequency
+        self._stop_event = threading.Event()
 
     def start(self):
-        self.stop_event = False
-        threading.Thread(target=self.main_loop, args=()).start()
+        self._stop_event.clear()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            start = time.monotonic()
+            current_obj = self.get_parent.get_data()
+            if current_obj is not None:
+                for output_queue in self.output_object:
+                    output_queue.put(current_obj)
+            elapsed = time.monotonic() - start
+            remaining = self.period - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+        self.get_parent.stop()
 
     def stop(self):
-        self.stop_event = True
-
-
-"""
-SinkParent object, used as an ending to a pipeline
-"""
+        self._stop_event.set()
 
 
 class SinkParent:
+    """Parent class for a data consumer. Subclass and override sink_data()."""
+
     def __init__(self, side_input: Optional[Any] = None):
         self.side_input = side_input
 
@@ -184,62 +178,69 @@ class SinkParent:
         pass
 
 
-"""
-DataSink executes the sin_data(input_object: list) function on objects incoming to each of input queues
-"""
-
-
 class DataSink:
+    """
+    Drains items from input queues and calls sink_parent.sink_data() with each
+    batch. Blocks on each queue with a timeout so it stays responsive to stop().
+    """
+
     def __init__(self, input_object: List[Queue], sink_parent: SinkParent):
         self.input_object = input_object
         self.sink_parent = sink_parent
-        self.stop_event = False
+        self._stop_event = threading.Event()
 
     def start(self):
-        self.stop_event = False
-        threading.Thread(target=self.run, args=()).start()
+        self._stop_event.clear()
+        threading.Thread(target=self._run, daemon=True).start()
 
-    def run(self):
-        while not self.stop_event:
-            if self.input_object:
-                current_obj = []
-                for input_queue in self.input_object:
-                    if not input_queue.empty():
-                        current_obj.append(input_queue.get())
-                if current_obj:
-                    self.sink_parent.sink_data(current_obj)
-
+    def _run(self):
+        while not self._stop_event.is_set():
+            current_obj = []
+            for input_queue in self.input_object:
+                try:
+                    current_obj.append(input_queue.get(timeout=_POLL_TIMEOUT))
+                except queue.Empty:
+                    pass
+            if current_obj:
+                self.sink_parent.sink_data(current_obj)
         self.sink_parent.stop()
 
     def stop(self):
-        self.stop_event = True
+        self._stop_event.set()
 
 
 class PeriodicDataSink:
+    """
+    Polls input queues at a fixed frequency and calls sink_parent.sink_data()
+    with whatever items are available. Runs in a single background thread.
+    """
+
     def __init__(self, input_object: List[Queue], sink_parent: SinkParent, frequency: float):
         self.input_object = input_object
         self.sink_parent = sink_parent
-        self.stop_event = False
-        self.period = 1/frequency
-
-    def sink_data(self):
-        if self.input_object:
-            current_obj = []
-            for input_queue in self.input_object:
-                if not input_queue.empty():
-                    current_obj.append(input_queue.get())
-            if current_obj:
-                self.sink_parent.sink_data(current_obj)
-
-    def main_loop(self):
-        while not self.stop_event:
-            threading.Thread(target=self.sink_data, args=()).start()
-            time.sleep(self.period)
-        self.stop_event = True
+        self.period = 1.0 / frequency
+        self._stop_event = threading.Event()
 
     def start(self):
-        self.stop_event = False
-        threading.Thread(target=self.main_loop, args=()).start()
+        self._stop_event.clear()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            start = time.monotonic()
+            current_obj = []
+            for input_queue in self.input_object:
+                try:
+                    current_obj.append(input_queue.get_nowait())
+                except queue.Empty:
+                    pass
+            if current_obj:
+                self.sink_parent.sink_data(current_obj)
+            elapsed = time.monotonic() - start
+            remaining = self.period - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
+        self.sink_parent.stop()
 
     def stop(self):
-        self.stop_event = True
+        self._stop_event.set()
